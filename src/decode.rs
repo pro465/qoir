@@ -1,7 +1,15 @@
 use crate::*;
 
-pub fn decode(encoded: &[u8]) -> Image {
-    assert_eq!(&encoded[..4], b"qoif", "invalid format to QOI");
+pub fn decode(encoded: &[u8]) -> Result<Image, DecodeError> {
+    if &encoded[..4] != b"qoif" {
+        return Err(DecodeError { loc: 0 });
+    }
+
+    if encoded.len() <= 14 {
+        return Err(DecodeError {
+            loc: encoded.len() - 1,
+        });
+    }
 
     let mut img = Image {
         pixels: Vec::new(),
@@ -11,37 +19,51 @@ pub fn decode(encoded: &[u8]) -> Image {
             3 => Channels::Rgb,
             4 => Channels::Rgba,
 
-            x => panic!("invalid channels header: {}", x),
+            _ => return Err(DecodeError { loc: 12 }),
         },
         colorspace: match encoded[13] {
             0 => ColorSpace::LinearAlpha,
             1 => ColorSpace::AllLinear,
 
-            x => panic!("invalid colorspace header: {}", x),
+            _ => return Err(DecodeError { loc: 13 }),
         },
     };
 
     let encoded = &encoded[14..];
 
     match img.channels {
-        Channels::Rgb => decode_pixels::<3>(encoded, &mut img.pixels),
-        Channels::Rgba => decode_pixels::<4>(encoded, &mut img.pixels),
+        Channels::Rgb => decode_pixels::<3>(encoded, &mut img.pixels)?,
+        Channels::Rgba => decode_pixels::<4>(encoded, &mut img.pixels)?,
     }
 
-    img
+    Ok(img)
 }
 
-fn decode_pixels<const SIZE: usize>(mut encoded: &[u8], res: &mut Vec<u8>) {
+fn decode_pixels<const SIZE: usize>(
+    mut encoded: &[u8],
+    res: &mut Vec<u8>,
+) -> Result<(), DecodeError> {
+    let mut loc = 14;
     let mut prev = [0; SIZE];
     let mut arr = [[0; SIZE]; 64];
 
     while encoded != FOOTER && encoded.len() > FOOTER.len() {
-        let (s, last) = decode_pixel(&arr, &prev, encoded, res);
+        let (s, last) = match decode_pixel(&arr, &prev, encoded, res) {
+            Ok(x) => x,
+            _ => return Err(DecodeError { loc }),
+        };
 
         encoded = &encoded[s..];
+        loc += s;
 
         arr[hash::<SIZE>(&last)] = last;
         prev = last;
+    }
+
+    if encoded != FOOTER {
+        Err(DecodeError { loc })
+    } else {
+        Ok(())
     }
 }
 
@@ -50,14 +72,23 @@ fn decode_pixel<const SIZE: usize>(
     prev: &[u8; SIZE],
     i: &[u8],
     v: &mut Vec<u8>,
-) -> (usize, [u8; SIZE]) {
+) -> Result<(usize, [u8; SIZE]), ()> {
     if i[0] == 255 {
-        assert_eq!(SIZE, 4);
+        if SIZE != 4 || i.len() < 5 {
+            return Err(());
+        }
+
         let res = i[1..5].try_into().unwrap();
+
         v.extend(res);
-        (5, res)
+
+        Ok((5, res))
     } else if i[0] == 254 {
         let mut res = [0; SIZE];
+
+        if i.len() < 4 {
+            return Err(());
+        }
 
         res[0] = i[1];
         res[1] = i[2];
@@ -69,12 +100,12 @@ fn decode_pixel<const SIZE: usize>(
 
         v.extend(res);
 
-        (4, res)
+        Ok((4, res))
     } else {
         let tag = i[0] >> 6;
         let f = [decode_idx, decode_diff, decode_luma, decode_run];
 
-        (f[usize::from(tag)])(arr, prev, i, v)
+        Ok((f[usize::from(tag)])(arr, prev, i, v))
     }
 }
 

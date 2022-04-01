@@ -26,18 +26,22 @@ pub struct Image {
     colorspace: ColorSpace,
 }
 
+pub struct DecodeError {
+    pub loc: usize,
+}
+
 pub mod decode;
 pub mod encode;
 
 use std::fs;
-use std::io::Result;
+use std::io::Result as IoRes;
 use std::path::Path;
 
-pub fn load<P: AsRef<Path>>(p: P) -> Result<Image> {
+pub fn load<P: AsRef<Path>>(p: P) -> IoRes<Result<Image, DecodeError>> {
     Ok(decode::decode(&fs::read(p)?))
 }
 
-pub fn store<P: AsRef<Path>>(img: &Image, p: P) -> Result<()> {
+pub fn store<P: AsRef<Path>>(img: &Image, p: P) -> IoRes<()> {
     fs::write(p, encode::encode(img))
 }
 

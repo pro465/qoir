@@ -1,12 +1,6 @@
 use crate::*;
 
 pub fn encode(img: &Image) -> Vec<u8> {
-    assert_eq!(
-        img.pixels.len() % img.channels as u8 as usize,
-        0,
-        "the number of bytes of the image must be evenly divisible by the number of channels"
-    );
-
     let mut res = Vec::new();
     header(img, &mut res);
 
@@ -17,7 +11,7 @@ pub fn encode(img: &Image) -> Vec<u8> {
 
     res.extend(FOOTER);
 
-    res
+    dbg!(res)
 }
 
 fn header(pic: &Image, res: &mut Vec<u8>) {
@@ -29,100 +23,97 @@ fn header(pic: &Image, res: &mut Vec<u8>) {
     res.push(pic.colorspace as u8);
 }
 
-fn encode_pixels<const SIZE: usize>(mut i: &[u8], v: &mut Vec<u8>) {
-    let mut prev = [0; SIZE];
+fn encode_pixels<const SIZE: usize>(mut i: &[Pixel], v: &mut Vec<u8>) {
+    let mut prev = Pixel(0, 0, 0, 255);
 
-    if SIZE == 4 {
-        prev[3] = 255;
-    }
-
-    let mut arr = [[0; SIZE]; 64];
+    let mut arr = [Pixel(0, 0, 0, 0); 64];
 
     while !i.is_empty() {
-        let curr: [u8; SIZE] = i[..SIZE].try_into().unwrap();
-
-        if SIZE == 3 || curr[3] == prev[3] {
-            if let Some((len, b)) = rle(&prev, i) {
-                i = &i[len * SIZE..];
-                v.push(b);
-            } else if let Some(b) = index(&arr, i) {
-                i = &i[SIZE..];
-                v.push(b);
-            } else if let Some(b) = diff(&prev, i) {
-                i = &i[SIZE..];
-                v.push(b);
-            } else if let Some(b) = luma(&prev, i) {
-                i = &i[SIZE..];
-                v.extend(b);
-            } else {
-                full::<SIZE>(&prev, i, v);
-            }
-        } else {
-            full::<SIZE>(&prev, i, v);
+        let mut curr = i[0];
+        if SIZE == 3 {
+            curr.3 = 255
         }
 
-        let hash = hash::<SIZE>(&curr);
+        if let Some(b) = index(&arr, curr) {
+            i = &i[1..];
+            v.push(b);
+        } else if curr.3 == prev.3 {
+            if let Some((len, b)) = rle(prev, i) {
+                i = &i[len..];
+                v.push(b);
+            } else if let Some(b) = diff(prev, curr) {
+                i = &i[1..];
+                v.push(b);
+            } else if let Some(b) = luma(prev, curr) {
+                i = &i[1..];
+                v.extend(b);
+            } else {
+                full::<3>(curr, v);
+                i = &i[1..];
+            }
+        } else {
+            full::<4>(curr, v);
+            i = &i[1..];
+        }
+
+        let hash = hash(curr);
         arr[hash] = curr;
         prev = curr;
     }
 }
 
-fn rle<const SIZE: usize>(prev: &[u8; SIZE], mut i: &[u8]) -> Option<(usize, u8)> {
+fn rle(prev: Pixel, i: &[Pixel]) -> Option<(usize, u8)> {
     let mut len = 0;
 
-    while len < 63 && !i.is_empty() && &i[..SIZE] == prev {
+    while len < i.len().min(63) && i[len] == prev {
         len += 1;
-        i = &i[SIZE..];
     }
 
     if len > 0 {
-        Some((len * SIZE, (0b11 << 6) | (len as u8 - 1)))
+        Some((len, (0b11 << 6) | (len as u8 - 1)))
     } else {
         None
     }
 }
 
-fn index<const SIZE: usize>(arr: &[[u8; SIZE]; 64], curr: &[u8]) -> Option<u8> {
-    let hash = hash::<SIZE>(curr);
-    if arr[hash] == curr[..SIZE] {
+fn index(arr: &[Pixel; 64], curr: Pixel) -> Option<u8> {
+    let hash = hash(curr);
+    if arr[hash] == curr {
         Some(0b00 | hash as u8)
     } else {
         None
     }
 }
 
-fn diff<const SIZE: usize>(prev: &[u8; SIZE], curr: &[u8]) -> Option<u8> {
-    if SIZE == 4 && prev[3] != curr[3] {
-        return None;
-    }
-
+fn diff(prev: Pixel, curr: Pixel) -> Option<u8> {
     let mut res = 0b01 << 6;
 
-    for i in 0..3 {
-        let diff = curr[i].wrapping_sub(prev[i]).wrapping_add(2);
+    let mut f = |d, i| {
+        let diff = wadd(d, 2);
 
         if diff > 3 {
             return None;
         }
 
-        res |= diff << (i * 2);
-    }
+        res |= diff << (4 - i * 2);
+        Some(())
+    };
+
+    f(wsub(curr.0, prev.0), 0)?;
+    f(wsub(curr.1, prev.1), 1)?;
+    f(wsub(curr.2, prev.2), 2)?;
 
     Some(res)
 }
 
-fn luma<const SIZE: usize>(prev: &[u8; SIZE], curr: &[u8]) -> Option<[u8; 2]> {
-    if SIZE == 4 && prev[3] != curr[3] {
-        return None;
-    }
+fn luma(prev: Pixel, curr: Pixel) -> Option<[u8; 2]> {
+    let dg = wsub(curr.1, prev.1);
+    let dr = wsub(wsub(curr.0, prev.0), dg);
+    let db = wsub(wsub(curr.2, prev.2), dg);
 
-    let dg = curr[1].wrapping_sub(prev[1]);
-    let dr = curr[0].wrapping_sub(prev[0]).wrapping_sub(dg);
-    let db = curr[2].wrapping_sub(prev[2]).wrapping_sub(dg);
-
-    let dg = dg.wrapping_add(32);
-    let dr = dr.wrapping_add(8);
-    let db = db.wrapping_add(8);
+    let dg = wadd(dg, 32);
+    let dr = wadd(dr, 8);
+    let db = wadd(db, 8);
 
     if dg > 63 || dr > 15 || db > 15 {
         return None;
@@ -131,14 +122,17 @@ fn luma<const SIZE: usize>(prev: &[u8; SIZE], curr: &[u8]) -> Option<[u8; 2]> {
     Some([(0b10 << 6) | dg, (dr << 4) | db])
 }
 
-fn full<const SIZE: usize>(prev: &[u8; SIZE], i: &[u8], v: &mut Vec<u8>) {
-    let (len, tag) = if SIZE == 4 && prev[3] != i[3] {
-        (4, 0xff)
-    } else {
-        (3, 0xfe)
-    };
+fn full<const SIZE: usize>(i: Pixel, v: &mut Vec<u8>) {
+    let tag = 0xfb + SIZE as u8;
 
-    v.push(tag);
+    let mut f = |i| v.push(i);
 
-    i[..len].iter().for_each(|i| v.push(*i));
+    f(tag);
+    f(i.0);
+    f(i.1);
+    f(i.2);
+
+    if SIZE == 4 {
+        f(i.3);
+    }
 }

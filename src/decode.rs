@@ -31,24 +31,18 @@ pub fn decode(encoded: &[u8]) -> Result<Image, DecodeError> {
 
     let encoded = &encoded[14..];
 
-    match img.channels {
-        Channels::Rgb => decode_pixels::<3>(encoded, &mut img.pixels)?,
-        Channels::Rgba => decode_pixels::<4>(encoded, &mut img.pixels)?,
-    }
+    decode_pixels(encoded, &mut img.pixels)?;
 
     Ok(img)
 }
 
-fn decode_pixels<const SIZE: usize>(
-    mut encoded: &[u8],
-    res: &mut Vec<u8>,
-) -> Result<(), DecodeError> {
+fn decode_pixels(mut encoded: &[u8], res: &mut Vec<Pixel>) -> Result<(), DecodeError> {
     let mut loc = 14;
-    let mut prev = [0; SIZE];
-    let mut arr = [[0; SIZE]; 64];
+    let mut prev = Pixel(0, 0, 0, 255);
+    let mut arr = [Pixel(0, 0, 0, 0); 64];
 
     while encoded != FOOTER && encoded.len() > FOOTER.len() {
-        let (s, last) = match decode_pixel(&arr, &prev, encoded, res) {
+        let (s, last) = match decode_pixel(&arr, prev, encoded, res) {
             Ok(x) => x,
             _ => return Err(DecodeError { loc }),
         };
@@ -56,7 +50,7 @@ fn decode_pixels<const SIZE: usize>(
         encoded = &encoded[s..];
         loc += s;
 
-        arr[hash::<SIZE>(&last)] = last;
+        arr[hash(last)] = last;
         prev = last;
     }
 
@@ -67,38 +61,30 @@ fn decode_pixels<const SIZE: usize>(
     }
 }
 
-fn decode_pixel<const SIZE: usize>(
-    arr: &[[u8; SIZE]; 64],
-    prev: &[u8; SIZE],
+fn decode_pixel(
+    arr: &[Pixel; 64],
+    prev: Pixel,
     i: &[u8],
-    v: &mut Vec<u8>,
-) -> Result<(usize, [u8; SIZE]), ()> {
+    v: &mut Vec<Pixel>,
+) -> Result<(usize, Pixel), ()> {
     if i[0] == 255 {
-        if SIZE != 4 || i.len() < 5 {
+        if i.len() < 5 {
             return Err(());
         }
 
-        let res = i[1..5].try_into().unwrap();
+        let res = Pixel(i[1], i[2], i[3], i[4]);
 
-        v.extend(res);
+        v.push(res);
 
         Ok((5, res))
     } else if i[0] == 254 {
-        let mut res = [0; SIZE];
-
         if i.len() < 4 {
             return Err(());
         }
 
-        res[0] = i[1];
-        res[1] = i[2];
-        res[2] = i[3];
+        let res = Pixel(i[1], i[2], i[3], prev.3);
 
-        if SIZE == 4 {
-            res[3] = prev[3];
-        }
-
-        v.extend(res);
+        v.push(res);
 
         Ok((4, res))
     } else {
@@ -109,48 +95,31 @@ fn decode_pixel<const SIZE: usize>(
     }
 }
 
-fn decode_idx<const SIZE: usize>(
-    arr: &[[u8; SIZE]; 64],
-    _prev: &[u8; SIZE],
-    i: &[u8],
-    v: &mut Vec<u8>,
-) -> (usize, [u8; SIZE]) {
+fn decode_idx(arr: &[Pixel; 64], _prev: Pixel, i: &[u8], v: &mut Vec<Pixel>) -> (usize, Pixel) {
     let idx = i[0] & 0x3f;
     let res = arr[idx as usize];
 
-    v.extend(res);
+    v.push(res);
 
     (1, res)
 }
 
-fn decode_diff<const SIZE: usize>(
-    _arr: &[[u8; SIZE]; 64],
-    prev: &[u8; SIZE],
-    i: &[u8],
-    v: &mut Vec<u8>,
-) -> (usize, [u8; SIZE]) {
-    let mut res = [0; SIZE];
+fn decode_diff(_arr: &[Pixel; 64], prev: Pixel, i: &[u8], v: &mut Vec<Pixel>) -> (usize, Pixel) {
     let curr = i[0] & 0x3f;
 
-    if SIZE == 4 {
-        res[3] = prev[3];
-    }
+    let res = Pixel(
+        wsub(wadd(prev.0, curr >> 4), 2),
+        wsub(wadd(prev.1, (curr >> 2) & 3), 2),
+        wsub(wadd(prev.2, curr & 3), 2),
+        prev.3,
+    );
 
-    res[0] = wsub(wadd(prev[0], curr >> 4), 2);
-    res[1] = wsub(wadd(prev[1], (curr >> 2) & 3), 2);
-    res[2] = wsub(wadd(prev[2], curr & 3), 2);
-
-    v.extend(res);
+    v.push(res);
 
     (1, res)
 }
 
-fn decode_luma<const SIZE: usize>(
-    _arr: &[[u8; SIZE]; 64],
-    prev: &[u8; SIZE],
-    i: &[u8],
-    v: &mut Vec<u8>,
-) -> (usize, [u8; SIZE]) {
+fn decode_luma(_arr: &[Pixel; 64], prev: Pixel, i: &[u8], v: &mut Vec<Pixel>) -> (usize, Pixel) {
     let curr = &i[..2];
     let dg = wsub(curr[0] & 0x3f, 32);
     let dr = wsub(curr[1] >> 4, 8);
@@ -159,29 +128,17 @@ fn decode_luma<const SIZE: usize>(
     let dr = wadd(dr, dg);
     let db = wadd(db, dg);
 
-    let mut res = [0; SIZE];
-    if SIZE == 4 {
-        res[3] = prev[3];
-    }
+    let res = Pixel(wadd(prev.0, dr), wadd(prev.1, dg), wadd(prev.2, db), prev.3);
 
-    res[0] = wadd(prev[0], dr);
-    res[1] = wadd(prev[1], dg);
-    res[2] = wadd(prev[2], db);
-
-    v.extend(res);
+    v.push(res);
 
     (2, res)
 }
 
-fn decode_run<const SIZE: usize>(
-    _arr: &[[u8; SIZE]; 64],
-    prev: &[u8; SIZE],
-    i: &[u8],
-    v: &mut Vec<u8>,
-) -> (usize, [u8; SIZE]) {
+fn decode_run(_arr: &[Pixel; 64], prev: Pixel, i: &[u8], v: &mut Vec<Pixel>) -> (usize, Pixel) {
     for _ in 0..(i[0] & 0x3f) + 1 {
-        v.extend(prev);
+        v.push(prev);
     }
 
-    (1, *prev)
+    (1, prev)
 }
